@@ -850,6 +850,98 @@ TEST_F(BulkMutatorTest, BigtableCookies) {
   status = mutator.MakeOneRequest(*mock, limiter, Options{});
   EXPECT_THAT(status, StatusIs(StatusCode::kPermissionDenied));
 }
+
+TEST_F(BulkMutatorTest, OmittedEntryMiddleOfThreeOnOkStream) {
+  BulkMutation mut(NonIdempotentMutation("r0"), NonIdempotentMutation("r1"),
+                   NonIdempotentMutation("r2"));
+
+  auto mock = std::make_shared<MockBigtableStub>();
+  EXPECT_CALL(*mock, MutateRows)
+      .WillOnce([this](auto context, auto const&,
+                       google::bigtable::v2::MutateRowsRequest const& request,
+                       auto const&) {
+        metadata_fixture_.SetServerMetadata(*context, {});
+        EXPECT_THAT(request, HasCorrectResourceNames());
+        EXPECT_EQ(3, request.entries_size());
+        auto stream = std::make_unique<MockMutateRowsStream>();
+        EXPECT_CALL(*stream, Read)
+            .WillOnce([](google::bigtable::v2::MutateRowsResponse* r) {
+              *r = MakeResponse(
+                  {{0, grpc::StatusCode::OK}, {2, grpc::StatusCode::OK}});
+              return std::nullopt;
+            })
+            .WillOnce(Return(Status()));
+        return stream;
+      });
+
+  auto policy = DefaultIdempotentMutationPolicy();
+  bigtable_internal::BulkMutator mutator(
+      kAppProfile, kTableName, *policy, std::move(mut),
+      std::make_shared<bigtable_internal::OperationContext>());
+
+  bigtable_internal::NoopMutateRowsLimiter limiter;
+  auto status = mutator.MakeOneRequest(*mock, limiter, Options{});
+  EXPECT_STATUS_OK(status);
+
+  auto failures = std::move(mutator).OnRetryDone();
+  ASSERT_EQ(1UL, failures.size());
+  EXPECT_EQ(1, failures[0].original_index());
+  EXPECT_THAT(failures[0].status(), StatusIs(StatusCode::kInternal));
+}
+
+TEST_F(BulkMutatorTest, MidStreamErrorPreservesConfirmedEntries) {
+  BulkMutation mut(IdempotentMutation("r0"), IdempotentMutation("r1"));
+
+  auto mock = std::make_shared<MockBigtableStub>();
+  EXPECT_CALL(*mock, MutateRows)
+      .WillOnce([this](auto context, auto const&,
+                       google::bigtable::v2::MutateRowsRequest const& request,
+                       auto const&) {
+        metadata_fixture_.SetServerMetadata(*context, {});
+        EXPECT_EQ(2, request.entries_size());
+        auto stream = std::make_unique<MockMutateRowsStream>();
+        EXPECT_CALL(*stream, Read)
+            .WillOnce([](google::bigtable::v2::MutateRowsResponse* r) {
+              *r = MakeResponse({{0, grpc::StatusCode::OK}});
+              return std::nullopt;
+            })
+            .WillOnce(
+                Return(Status(StatusCode::kUnavailable, "mid-stream fail")));
+        return stream;
+      })
+      .WillOnce([this](auto context, auto const&,
+                       google::bigtable::v2::MutateRowsRequest const& request,
+                       auto const&) {
+        metadata_fixture_.SetServerMetadata(*context, {});
+        EXPECT_EQ(1, request.entries_size());
+        EXPECT_EQ("r1", request.entries(0).row_key());
+        auto stream = std::make_unique<MockMutateRowsStream>();
+        EXPECT_CALL(*stream, Read)
+            .WillOnce([](google::bigtable::v2::MutateRowsResponse* r) {
+              *r = MakeResponse({{0, grpc::StatusCode::OK}});
+              return std::nullopt;
+            })
+            .WillOnce(Return(Status()));
+        return stream;
+      });
+
+  auto policy = DefaultIdempotentMutationPolicy();
+  bigtable_internal::BulkMutator mutator(
+      kAppProfile, kTableName, *policy, std::move(mut),
+      std::make_shared<bigtable_internal::OperationContext>());
+
+  bigtable_internal::NoopMutateRowsLimiter limiter;
+  auto status1 = mutator.MakeOneRequest(*mock, limiter, Options{});
+  EXPECT_THAT(status1, StatusIs(StatusCode::kUnavailable));
+  EXPECT_TRUE(mutator.HasPendingMutations());
+
+  auto status2 = mutator.MakeOneRequest(*mock, limiter, Options{});
+  EXPECT_STATUS_OK(status2);
+  EXPECT_FALSE(mutator.HasPendingMutations());
+
+  auto failures = std::move(mutator).OnRetryDone();
+  EXPECT_THAT(failures, IsEmpty());
+}
 }  // namespace
 GOOGLE_CLOUD_CPP_INLINE_NAMESPACE_END
 }  // namespace bigtable
