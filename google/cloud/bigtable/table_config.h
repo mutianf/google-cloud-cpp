@@ -22,12 +22,22 @@
 #include <string>
 #include <vector>
 
+#include "google/cloud/internal/disable_deprecation_warnings.inc"
+
 namespace google {
 namespace cloud {
 namespace bigtable {
 GOOGLE_CLOUD_CPP_INLINE_NAMESPACE_BEGIN
-/// Specify the initial schema for a new table.
-class TableConfig {
+/**
+ * Specify the initial schema for a new table.
+ *
+ * @deprecated Use `google::bigtable::admin::v2::CreateTableRequest` with
+ *     `google::cloud::bigtable_admin::BigtableTableAdminClient` instead.
+ */
+class GOOGLE_CLOUD_CPP_DEPRECATED(
+    "Use `google::bigtable::admin::v2::CreateTableRequest` with "
+    "`google::cloud::bigtable_admin::BigtableTableAdminClient` instead.")
+    TableConfig {
  public:
   TableConfig() : granularity_(TIMESTAMP_GRANULARITY_UNSPECIFIED) {}
 
@@ -100,5 +110,7 @@ GOOGLE_CLOUD_CPP_INLINE_NAMESPACE_END
 }  // namespace bigtable
 }  // namespace cloud
 }  // namespace google
+
+#include "google/cloud/internal/diagnostics_pop.inc"
 
 #endif  // GOOGLE_CLOUD_CPP_GOOGLE_CLOUD_BIGTABLE_TABLE_CONFIG_H
